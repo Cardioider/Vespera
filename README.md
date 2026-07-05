@@ -8,7 +8,7 @@
 
 <div align = "center">
 
-<img src="https://raw.githubusercontent.com/ChaseanChen/Vespera/blob/main/src/media/favicon.ico" width="100" height="100" alt="Oracipher icon">
+<img src="https://github.com/Cardioider/Vespera/blob/main/src/media/favicon.ico" width="100" height="100" alt="Oracipher icon">
 
 </div>
 
