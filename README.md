@@ -119,7 +119,7 @@ unsealer samsung ./my_backup.spass -f md -o ./report.md
 
 <div align = "center">
 
-<img src="https://raw.githubusercontent.com/ChaseanChen/Vespera/blob/main/src/media/authenticator%20wall.webp" width="400" alt="Google Authenticator Wallpaper">
+<img src="https://github.com/Cardioider/Vespera/blob/main/src/media/authenticator%20wall.webp" width="400" alt="Google Authenticator Wallpaper">
 
 </div>
 
