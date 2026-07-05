@@ -55,7 +55,7 @@ You can obtain a backup in two ways:
 
 <div align = "center">
 
-<img src="https://raw.githubusercontent.com/ChaseanChen/Vespera/blob/main/src/media/smart_switch.png" width="50" height="50" alt="Smart Switch">
+<img src="https://github.com/Cardioider/Vespera/blob/main/src/media/smart_switch.png" width="50" height="50" alt="Smart Switch">
 
 </div>
 
