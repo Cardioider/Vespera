@@ -74,7 +74,12 @@ jobs:
       - name: Build executable
         shell: bash
         run: |
+          EXTRA_BINARIES=()
+          if [ "$RUNNER_OS" == "macOS" ]; then
+            EXTRA_BINARIES+=(--add-binary "$(brew --prefix zbar)/lib/libzbar.dylib:.")
+          fi
           pyinstaller --onefile --name unsealer --clean --noconfirm \
+            "${EXTRA_BINARIES[@]}" \
             --collect-data pyfiglet \
             --collect-binaries pyzbar \
             --collect-data unsealer.samsung \

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -42,3 +43,23 @@ def test_decoder_failure_is_not_silently_ignored(mocker, tmp_path):
     mocker.patch.object(scanner, "_load_decoder", return_value=mocker.Mock(side_effect=RuntimeError("decoder failed")))
     with pytest.raises(RuntimeError, match="decoder failed"):
         scanner.extract_uris_from_path(str(image))
+
+
+def test_macos_homebrew_library_outside_default_search_path(mocker):
+    library = SimpleNamespace(find_library=lambda name: None)
+    mocker.patch.object(scanner.sys, "frozen", False, create=True)
+    mocker.patch.object(Path, "is_file", autospec=True,
+                        side_effect=lambda path: path.as_posix() == "/opt/homebrew/opt/zbar/lib/libzbar.dylib")
+    scanner._configure_macos_zbar(library)
+    assert library.find_library("zbar") == str(Path("/opt/homebrew/opt/zbar/lib/libzbar.dylib"))
+    assert library.find_library("unrelated-library") is None
+
+
+def test_macos_prefers_bundled_zbar(mocker, tmp_path):
+    bundled = tmp_path / "libzbar.dylib"
+    bundled.touch()
+    library = SimpleNamespace(find_library=lambda name: "/system/libzbar.dylib")
+    mocker.patch.object(scanner.sys, "frozen", True, create=True)
+    mocker.patch.object(scanner.sys, "_MEIPASS", str(tmp_path), create=True)
+    scanner._configure_macos_zbar(library)
+    assert library.find_library("zbar") == str(bundled)

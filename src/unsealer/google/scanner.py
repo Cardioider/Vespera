@@ -1,11 +1,34 @@
 """Optional QR support; importing the CLI must not require a native ZBar library."""
 
 from pathlib import Path
+import sys
 from typing import Set
+
+
+def _configure_macos_zbar(library):
+    """Resolve bundled and Homebrew libraries outside dyld's default paths."""
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys._MEIPASS) / "libzbar.dylib")
+    existing = library.find_library("zbar")
+    if existing:
+        candidates.append(Path(existing))
+    candidates.extend([
+        Path("/opt/homebrew/opt/zbar/lib/libzbar.dylib"),
+        Path("/usr/local/opt/zbar/lib/libzbar.dylib"),
+    ])
+    for candidate in candidates:
+        if candidate.is_file():
+            original_find = library.find_library
+            library.find_library = lambda name, path=str(candidate): path if name == "zbar" else original_find(name)
+            return
 
 
 def _load_decoder():
     try:
+        if sys.platform == "darwin":
+            from pyzbar import zbar_library
+            _configure_macos_zbar(zbar_library)
         from pyzbar.pyzbar import decode
     except (ImportError, OSError) as exc:
         raise RuntimeError(
