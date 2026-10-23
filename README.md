@@ -8,15 +8,15 @@
 
 <div align = "center">
 
-<img src="https://github.com/Cardioider/Vespera/blob/main/src/media/favicon.ico" width="100" height="100" alt="Oracipher icon">
+<img src="https://github.com/Cardioider/Vespera/blob/main/src/media/favicon.ico" width="100" height="100" alt="Vespera icon">
 
 </div>
 
 <div align = "center">
 
-[![GitHub Release](https://img.shields.io/github/v/release/ChaseanChen/Vespera?include_prereleases)](https://github.com/ChaseanChen/Vespera/releases)
-[![PyPI Version](https://img.shields.io/badge/pypi-v2.0.6-blue)](https://pypi.org/project/unsealer/)
-[![Python Versions](https://img.shields.io/badge/python-3.7+-brightgreen.svg)](https://www.python.org/downloads/)
+[![GitHub Release](https://img.shields.io/github/v/release/Cardioider/Vespera?include_prereleases)](https://github.com/Cardioider/Vespera/releases)
+[![PyPI Version](https://img.shields.io/pypi/v/unsealer)](https://pypi.org/project/unsealer/)
+[![Python Versions](https://img.shields.io/badge/python-3.9+-brightgreen.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 </div>
@@ -34,7 +34,7 @@ Whether you're migrating to a new password manager, creating a secure offline ba
 >
 > - **USE AT YOUR OWN RISK.** The author assumes no liability for data loss or security incidents.
 > - **HANDLE DECRYPTED DATA CAREFULLY.** Decrypted data is stored in **plain text**. Store it in a secure location and avoid unnecessary sharing.
-> - **100% OFFLINE & PRIVATE.** Unsealer runs entirely on your local machine. It does not—and cannot—connect to the internet or transmit your data anywhere. You are encouraged to audit the source code to verify this.
+> - **100% OFFLINE & PRIVATE.** Unsealer runs entirely on your local machine. Recovery operations read local inputs and do not make network requests. Installing dependencies requires internet access. You are encouraged to audit the source code to verify this.
 
 ## Core Features
 
@@ -42,8 +42,8 @@ Whether you're migrating to a new password manager, creating a secure offline ba
 - **Google Module**: Parse `otpauth-migration://` URIs or directly extract 2FA secrets from Google Authenticator export QR codes. (Note: If you have many accounts, Google may generate multiple QR codes; ensure you scan all of them).
 - **Multiple Export Formats**: Supports **CSV** (for spreadsheets), plain **TXT** (for readability), or structured **Markdown** (for reports).
 - **Secure Interaction**: Enforces interactive password prompts to prevent your master password from being saved in shell history.
-- **Instant Preview**: Quickly inspect backup contents directly in the terminal without writing files to disk.
-- **Cross-Platform Support**: Fully compatible with Windows, macOS, and Linux. Binaries are available, or run via Python 3.7+.
+- **Instant Preview**: Inspect Samsung table counts or Google account labels without writing files. Preview does not print passwords or OTP secrets.
+- **Cross-Platform Support**: Supports Windows, macOS (Intel and Apple Silicon), and Linux. Run via Python 3.9+ or use an available release binary. QR scanning requires ZBar; URI and JSON imports do not.
 
 ---
 
@@ -81,7 +81,7 @@ You can obtain a backup in two ways:
 ## Step 2: Installation
 
 ### Method A: Direct Download (Recommended for most users)
-Go to the [**Releases**](https://github.com/ChaseanChen/Vespera/releases) page and download the binary for your OS. It runs standalone without needing Python.
+Go to the [**Releases**](https://github.com/Cardioider/Vespera/releases) page and download the binary for your OS. It runs standalone without needing Python.
 
 ### Method B: Via PyPI
 ```bash
@@ -91,7 +91,7 @@ pip install unsealer
 
 ### Method C: From Source
 ```bash
-git clone https://github.com/ChaseanChen/Vespera.git
+git clone https://github.com/Cardioider/Vespera.git
 cd Vespera
 pip install .
 ```
@@ -105,10 +105,10 @@ Unsealer uses a subcommand structure.
 ### 1. Decrypt Samsung Pass (`.spass`)
 
 ```bash
-# Basic export (Default: CSV)
+# Basic export (Default: Markdown)
 unsealer samsung ./my_backup.spass
 
-# Preview mode (Display first 5 entries in terminal only)
+# Preview mode (Display table counts only; no files are written)
 unsealer samsung ./my_backup.spass --preview
 
 # Export to Markdown at a specific path
@@ -125,7 +125,7 @@ unsealer samsung ./my_backup.spass -f md -o ./report.md
 
 ```bash
 # Extract from a migration string
-unsealer google "otpauth-migration://offline?data=..."
+unsealer google "otpauth-migration://offline?data=..." -o 2fa_backup.json
 
 # Batch scan a folder of QR screenshots and generate a report
 unsealer google ./qr_screenshots/ -o 2fa_backup.md
@@ -133,28 +133,38 @@ unsealer google ./qr_screenshots/ -o 2fa_backup.md
 
 #### CLI Reference
 
-| Argument | Description |
+Samsung usage: `unsealer samsung INPUT.spass [-f FORMAT] [-o PATH] [--preview]`.
+
+| Option | Behavior |
 | :--- | :--- |
-| `input_file` | **(Required)** Path to your `.spass` file or image folder. |
-| `password` | **(Optional)** Your master password. If omitted, you will be prompted securely. |
+| `input_file` | Required local Samsung Pass backup file. |
+| `-f / --format` | `md` (default), `csv`, `txt`, or `json`. |
+| `-o / --output` | Output path; defaults to the input filename with the chosen format's extension. |
+| `--preview` | Show table counts; do not write files, even if `-o` is supplied. |
 
-| Option | Full Flag | Description |
-| :---: | :---: | :--- |
-| `-f` | `--format` | Output format: `csv`, `txt`, `md`. **Default: `csv`**. |
-| `-o` | `--output` | Destination path for the output file. |
-| | `--preview` | Display first 5 entries as a table in terminal. |
+The backup/export password is always requested interactively. Password arguments are not supported.
 
-> [!WARNING]
-> **Security Risk: Passwords in Command Line**
-> **Strongly discouraged.** Providing passwords as arguments may leave them in your `.bash_history`. Use the interactive prompt instead.
+Google usage: `unsealer google [INPUT ...] [-o PATH] [--preview]`.
+
+| Option | Behavior |
+| :--- | :--- |
+| `inputs` | One or more migration URIs, QR images, image directories, or JSON exports. With no input, an interactive terminal prompts for one. |
+| `-o / --output` | Infer the format from `.md`, `.csv`, `.txt`, or `.json` (Markdown when no extension is given). Without this option, only account labels are shown. |
+| `--preview` | Show account labels without writing files, even if `-o` is supplied. |
+
+- CSV output contains one file per table. For example, `-o backup.csv` creates `backup_export/`; the command prints the actual destination.
+- JSON is the preferred format for lossless re-import. Google accepts either an account list or a `google_authenticator` list inside an export object.
+- HOTP type and counter, algorithm, and digit count are preserved. Only identical account records are deduplicated.
+- Supply **all** Google export QR codes together. The tool does not verify whether an entire multi-code export batch is present. Failed inputs return a non-zero exit status and prevent a partial Google export.
+- An output path cannot replace an input file. Individual output files are replaced atomically; POSIX systems create them with owner-only permissions. CSV tables are written separately, so a later write failure can leave earlier tables on disk.
 
 ---
 
 ## FAQ
 
-**Q: I get a "Decryption or Parsing Failed" error. What happened?**
+**Q: I get a "Decryption failed" error. What happened?**
 A: This is usually caused by:
-1. **Incorrect Password**: 99% of failures are due to wrong passwords. Smart Switch backups use your **Samsung Account password**; mobile exports use the **custom password** you set during export.
+1. **Incorrect Password**: Use the password associated with that backup. For a direct mobile export, this is the custom password you set during export.
 2. **Corrupted File**: The `.spass` file may be corrupted during transfer. Try creating a fresh backup.
 3. **Incompatible Version**: While Samsung/Google formats have been stable for years, a major update might require a tool update.
 
@@ -172,6 +182,17 @@ A: The Google module's QR scanning depends on `zbar`. Install it via:
 - macOS: `brew install zbar`
 
 ---
+
+## Development
+
+```bash
+python -m pip install -e ".[test]" build pyinstaller
+python -m pytest -q
+python -m build
+python scripts/smoke_test.py
+```
+
+The smoke checks use synthetic accounts and exercise the installed command, JSON round trips, failure exit codes, and real QR decoding. Install ZBar before running QR smoke checks on Linux/macOS. CI runs the tests on Python 3.9 and builds and tests executables on Windows, Linux, Intel macOS, and Apple Silicon macOS. Releases are published only for version tags after these checks pass.
 
 ## Acknowledgments
 

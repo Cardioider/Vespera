@@ -6,13 +6,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unsealer"
-version = "2.1.0"
+dynamic = ["version"]
 authors = [
   { name="Chase Chen", email="eldric520lol@gmail.com" },
 ]
 description = "Decrypt Samsung Pass and Google Authenticator data"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -27,7 +27,6 @@ dependencies = [
     "pycryptodome>=3.15.0",
     "rich",
     "pyfiglet",
-    "protobuf>=4.21.0",
     "pyzbar",
     "pillow",
 ]
@@ -38,8 +37,19 @@ dependencies = [
 unsealer = "unsealer.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/ChaseanChen/Vespera"
-"Bug Tracker" = "https://github.com/Oracipher/Vespera/issues"
+Homepage = "https://github.com/Cardioider/Vespera"
+"Bug Tracker" = "https://github.com/Cardioider/Vespera/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["unsealer*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "unsealer.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["src/tests"]
+pythonpath = ["src"]
 
 
 # 打包工具
@@ -51,4 +61,5 @@ test = [
     "pytest",
     "pytest-mock",
     "pytest-cov",
+    "qrcode>=7.3",
 ]

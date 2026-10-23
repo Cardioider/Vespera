@@ -1,48 +1,44 @@
-# src/tests/test_google_scanner.py
+from types import SimpleNamespace
+
 import pytest
-from pathlib import Path
+from PIL import Image
+
 from unsealer.google import scanner
 
-def test_extract_uris_from_path_filtering(mocker):
-    """验证扫描器只处理支持的图片后缀并能正确收集 URI"""
-    # 模拟一个包含多种文件的文件夹
-    mock_path_class = mocker.patch("unsealer.google.scanner.Path")
-    
-    mock_instance = mock_path_class.return_value
-    mock_instance.exists.return_value = True
-    mock_instance.is_file.return_value = False
-    
-    file_png = mocker.MagicMock()
-    file_png.suffix = ".png"
-    file_txt = mocker.MagicMock()
-    file_txt.suffix = ".txt"
-    
-    mock_instance.iterdir.return_value = [file_png, file_txt]
-    
-    # Mock 图片打开和 QR 解码
-    mocker.patch("PIL.Image.open")
-    mock_decode = mocker.patch("unsealer.google.scanner.decode")
-    
-    # 模拟识别到一个有效的迁移 URI
-    mock_obj = mocker.MagicMock()
-    mock_obj.data.decode.return_value = "otpauth-migration://found_data"
-    mock_decode.return_value = [mock_obj]
 
-    results = scanner.extract_uris_from_path("/mock/path")
-    
-    assert "otpauth-migration://found_data" in results
-    assert len(results) == 1
-    # 确保只尝试解析了 .png，跳过了 .txt
-    assert mock_decode.call_count == 1
+def test_extract_uris_from_path_filtering(mocker, tmp_path):
+    Image.new("RGB", (10, 10), "white").save(tmp_path / "image.png")
+    (tmp_path / "text.txt").write_text("not an image", encoding="utf-8")
+    decoder = mocker.Mock(return_value=[
+        SimpleNamespace(data=b"otpauth-migration://found_data"),
+        SimpleNamespace(data=b"not-a-migration-uri"),
+        SimpleNamespace(data=b"\xff"),
+    ])
+    mocker.patch.object(scanner, "_load_decoder", return_value=decoder)
+    assert scanner.extract_uris_from_path(str(tmp_path)) == {"otpauth-migration://found_data"}
+    assert decoder.call_count == 1
 
-def test_extract_uris_corrupted_image(mocker):
-    """验证当图片损坏时，扫描器不会崩溃而是继续工作"""
-    mocker.patch("pathlib.Path.exists", return_value=True)
-    mocker.patch("pathlib.Path.is_file", return_value=True)
-    mocker.patch("pathlib.Path.suffix", ".jpg")
-    
-    # 模拟图片读取失败（抛出异常）
-    mocker.patch("PIL.Image.open", side_effect=RuntimeError("Corrupted"))
-    
-    results = scanner.extract_uris_from_path("bad_image.jpg")
-    assert results == set() # 应该返回空集合而不是抛出异常
+
+def test_extract_uris_corrupted_image(mocker, tmp_path):
+    image = tmp_path / "bad.jpg"
+    image.write_bytes(b"broken image")
+    decoder = mocker.Mock()
+    mocker.patch.object(scanner, "_load_decoder", return_value=decoder)
+    assert scanner.extract_uris_from_path(str(image)) == set()
+    decoder.assert_not_called()
+
+
+def test_missing_zbar_reports_actionable_error(mocker, tmp_path):
+    image = tmp_path / "image.png"
+    Image.new("RGB", (10, 10)).save(image)
+    mocker.patch.dict("sys.modules", {"pyzbar.pyzbar": None})
+    with pytest.raises(RuntimeError, match="ZBar"):
+        scanner.extract_uris_from_path(str(image))
+
+
+def test_decoder_failure_is_not_silently_ignored(mocker, tmp_path):
+    image = tmp_path / "image.png"
+    Image.new("RGB", (10, 10)).save(image)
+    mocker.patch.object(scanner, "_load_decoder", return_value=mocker.Mock(side_effect=RuntimeError("decoder failed")))
+    with pytest.raises(RuntimeError, match="decoder failed"):
+        scanner.extract_uris_from_path(str(image))

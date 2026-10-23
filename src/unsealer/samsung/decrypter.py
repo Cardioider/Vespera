@@ -6,26 +6,17 @@ import csv
 import io
 import re
 import json
-import sys
 import binascii
 from typing import List, Dict, Any, Union
 from pathlib import Path
 from unsealer.common.models import Credential
 
-try:
-    from Crypto.Cipher import AES
-    from Crypto.Util.Padding import unpad
-except ImportError:
-    print("Fatal Error: Core cryptographic library 'pycryptodome' is missing.")
-    sys.exit(1)
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
 
 SCHEMA_PATH = Path(__file__).parent / "schema.json"
-try:
-    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
-        TABLE_SCHEMA = json.load(f)
-except Exception as e:
-    print(f"Fatal Error: Failed to load schema.json: {e}")
-    sys.exit(1)
+with SCHEMA_PATH.open(encoding="utf-8") as schema_file:
+    TABLE_SCHEMA = json.load(schema_file)
 
 # --- Cryptographic Constants ---
 SALT_SIZE = 20
@@ -37,17 +28,22 @@ def _safe_b64_decode(b64_string: str) -> str:
     if not b64_string or b64_string.strip() in ["", "JiYmTlVMTCYmJg=="]:
         return ""
     try:
-        return base64.b64decode(b64_string).decode("utf-8")
-    except:
+        return base64.b64decode(b64_string, validate=True).decode("utf-8")
+    except (ValueError, UnicodeError, binascii.Error):
         return b64_string
 
 def _parse_json_field(field_value: str) -> Union[Dict, str]:
+    try:
+        value = json.loads(field_value)
+        return json.loads(value) if isinstance(value, str) else value
+    except (ValueError, TypeError):
+        pass
     try:
         cleaned_value = field_value.replace('\\"', '"').strip()
         if cleaned_value.startswith('"') and cleaned_value.endswith('"'):
             cleaned_value = cleaned_value[1:-1]
         return json.loads(cleaned_value)
-    except:
+    except (ValueError, TypeError):
         return field_value
 
 def _parse_multi_b64_field(field_value: str) -> List[str]:
@@ -83,13 +79,15 @@ def _to_unified_model(raw_entry: Dict, table_type: str) -> Credential:
             url=raw_entry.get("origin_url", ""),
             secret=otp_secret,
             note=raw_entry.get("credential_memo", ""),
-            category="login"
+            category="login",
+            extra=raw_entry,
         )
     elif table_type == "notes":
         return Credential(
             title=raw_entry.get("note_title", "Untitled Note"),
             note=raw_entry.get("note_detail", ""),
-            category="note"
+            category="note",
+            extra=raw_entry,
         )
     elif table_type == "cards":
         return Credential(
@@ -98,6 +96,7 @@ def _to_unified_model(raw_entry: Dict, table_type: str) -> Credential:
             password=raw_entry.get("card_number_encrypted", ""),
             category="card",
             extra={
+                **raw_entry,
                 "brand": raw_entry.get("reserved_4"),
                 "expiry": f"{raw_entry.get('expiration_month')}/{raw_entry.get('expiration_year')}"
             }
@@ -112,12 +111,15 @@ def parse_decrypted_content(decrypted_content: str) -> Dict[str, List[Dict[str, 
 
     for block in blocks:
         clean_block = block.strip()
-        if not clean_block or clean_block.count(";") < 2: continue
+        if not clean_block:
+            continue
 
         try:
-            reader = csv.DictReader(io.StringIO(clean_block), delimiter=";")
+            reader = csv.DictReader(io.StringIO(clean_block), delimiter=";", strict=True)
             headers = reader.fieldnames
             if not headers: continue
+            if len(set(headers)) != len(headers):
+                raise ValueError("Duplicate table columns")
 
             table_name = None
             schema = {}
@@ -134,8 +136,11 @@ def parse_decrypted_content(decrypted_content: str) -> Dict[str, List[Dict[str, 
 
             table_entries = []
             for row in reader:
+                if None in row or any(value is None for value in row.values()):
+                    raise ValueError("Table row does not match its header")
                 raw_entry = {}
-                for field in schema.get("useful_fields", []):
+                # Preserve new fields from future backup versions as metadata.
+                for field in headers:
                     val = _safe_b64_decode(row.get(field, ""))
                     if not val: continue
                     
@@ -150,23 +155,25 @@ def parse_decrypted_content(decrypted_content: str) -> Dict[str, List[Dict[str, 
                     table_entries.append(unified_obj.to_dict())
 
             if table_entries:
-                all_tables[table_name] = table_entries
+                all_tables.setdefault(table_name, []).extend(table_entries)
 
-        except Exception as e:
-            print(f"Warning: Parsing error: {e}", file=sys.stderr)
-            continue
+        except (csv.Error, ValueError, TypeError) as exc:
+            raise ValueError("Invalid Samsung table; refusing a partial export") from exc
 
     return all_tables
 
 def decrypt_and_parse(file_content_bytes: bytes, password: str) -> Dict[str, List[Dict[str, Any]]]:
     try:
-        binary_data = base64.b64decode(file_content_bytes.decode("utf-8").strip())
-        salt, iv, encrypted_data = binary_data[:20], binary_data[20:36], binary_data[36:]
+        binary_data = base64.b64decode(b"".join(file_content_bytes.split()), validate=True)
+        header_size = SALT_SIZE + IV_SIZE
+        if len(binary_data) < header_size + AES.block_size or (len(binary_data) - header_size) % AES.block_size:
+            raise ValueError("Invalid encrypted backup length")
+        salt, iv, encrypted_data = binary_data[:SALT_SIZE], binary_data[SALT_SIZE:header_size], binary_data[header_size:]
 
-        key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS, dklen=32)
+        key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE)
         cipher = AES.new(key, AES.MODE_CBC, iv)
         decrypted_data = unpad(cipher.decrypt(encrypted_data), AES.block_size, style="pkcs7")
 
         return parse_decrypted_content(decrypted_data.decode("utf-8"))
-    except Exception as e:
-        raise ValueError(f"Decryption or Parsing Failed: {str(e)}")
+    except (ValueError, UnicodeError, binascii.Error) as exc:
+        raise ValueError("Decryption failed: invalid backup, password, or decoded content") from exc

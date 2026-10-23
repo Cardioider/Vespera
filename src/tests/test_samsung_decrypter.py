@@ -44,6 +44,7 @@ def test_parse_decrypted_content_structure():
     assert len(result["logins"]) == 1
     assert result["logins"][0]["title"] == "Test"
     assert result["logins"][0]["username_value"] == "admin"
+    assert result["logins"][0]["username"] == "admin"
 
 def test_decryption_logic_failure():
     """

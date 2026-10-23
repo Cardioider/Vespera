@@ -1,85 +1,108 @@
-import json
+"""Shared exports with atomic writes and explicit output destinations."""
+
 import csv
-from pathlib import Path
+import json
+import os
+import re
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Dict, List, Any
+from pathlib import Path
+from typing import Dict, List
+
+from unsealer import __version__
+
+
+@contextmanager
+def _open_output(path: Path, encoding="utf-8", newline=None):
+    """Do not truncate a previous backup if serialization or writing fails."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary = tempfile.mkstemp(prefix=".unsealer-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding=encoding, newline=newline) as stream:
+            yield stream
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
 
 class DataExporter:
-    """统一数据导出引擎：解决格式不一、嵌套难读的问题"""
-    
     def __init__(self, banner: str = ""):
         self.banner = banner.strip() if banner else ""
-        self.timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    def export(self, data: Dict[str, List[Dict]], output_path: Path, fmt: str):
-        """导出分发器"""
-        if not data:
-            return
-            
+    @staticmethod
+    def destination(output_path: Path, fmt: str) -> Path:
+        path = Path(output_path)
+        if fmt.lower() == "csv" and path.suffix:
+            return path.parent / f"{path.stem}_export"
+        return path
+
+    def export(self, data: Dict[str, List[Dict]], output_path: Path, fmt: str) -> Path:
         fmt = fmt.lower()
-        if fmt == "json": self._to_json(data, output_path)
-        elif fmt == "csv": self._to_csv(data, output_path)
-        elif fmt == "md": self._to_markdown(data, output_path)
-        elif fmt == "txt": self._to_text(data, output_path)
+        writers = {"json": self._to_json, "csv": self._to_csv,
+                   "md": self._to_markdown, "txt": self._to_text}
+        if fmt not in writers:
+            raise ValueError(f"Unsupported export format: {fmt}")
+        if not data or not any(data.values()):
+            raise ValueError("No records to export")
+        destination = self.destination(output_path, fmt)
+        writers[fmt](data, destination)
+        return destination
 
     def _to_json(self, data: Dict, path: Path):
-        meta = {"metadata": {"generated_at": self.timestamp, "version": "2.0.8"}}
-        path.write_text(json.dumps({**meta, **data}, indent=4, ensure_ascii=False), encoding='utf-8')
+        payload = {**data, "metadata": {"generated_at": self.timestamp, "version": __version__}}
+        with _open_output(path) as stream:
+            json.dump(payload, stream, indent=4, ensure_ascii=False)
 
     def _to_csv(self, data: Dict, path: Path):
-        # CSV 处理逻辑：如果是文件路径，则创建一个同名文件夹存放多张表
-        export_dir = path if not path.suffix else path.parent / f"{path.stem}_export"
-        export_dir.mkdir(parents=True, exist_ok=True)
-            
+        if any(not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", name) for name in data):
+            raise ValueError("Invalid table name for CSV export")
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
         for table_name, rows in data.items():
-            if not rows: continue
-            file_path = export_dir / f"{table_name}.csv"
-            # 自动获取所有行中出现过的所有 key 作为表头
-            headers = sorted(set().union(*(d.keys() for d in rows)))
-            with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.DictWriter(f, fieldnames=headers)
+            if not rows:
+                continue
+            headers = sorted(set().union(*(row.keys() for row in rows)))
+            with _open_output(path / f"{table_name}.csv", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=headers)
                 writer.writeheader()
                 writer.writerows(rows)
 
+    @staticmethod
+    def _markdown_text(value):
+        text = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return re.sub(r"([\\\x60*_{}\[\]()#+.!|~>-])", r"\\\1", text).replace("\n", "  \n")
+
     def _to_markdown(self, data: Dict, path: Path):
-        lines = [f"```\n{self.banner}\n```\n" if self.banner else "# Unsealer Decryption Report"]
-        lines.append(f"> **Export Time**: `{self.timestamp}`  \n> **Status**: ✅ Decrypted & Flattened\n")
-        
+        lines = [f"~~~\n{self.banner}\n~~~\n" if self.banner else "# Unsealer Decryption Report"]
+        lines.append(f"> **Export Time**: {self.timestamp}\n")
         for table_name, rows in data.items():
-            lines.append(f"\n## 📂 {table_name.upper()} ({len(rows)} items)")
-            for i, entry in enumerate(rows, 1):
-                title = self._get_title(entry)
-                lines.append(f"\n### {i}. {title}")
-                for k, v in entry.items():
-                    # 跳过作为标题的字段，避免重复显示
-                    if not v or k in ["title", "name", "note_title", "issuer", "full_name", "bank_name"]: 
+            lines.append(f"\n## {self._markdown_text(table_name.upper())} ({len(rows)} items)")
+            for index, entry in enumerate(rows, 1):
+                lines.append(f"\n### {index}. {self._markdown_text(self._get_title(entry))}")
+                for key, value in entry.items():
+                    if value is None or value == "" or key == "title":
                         continue
-                    
-                    label = k.replace('_', ' ').title()
-                    # 针对敏感字段添加防护图标和代码块
-                    sensitive_keys = ["password", "secret", "cvv", "pin", "id_number", "card_number"]
-                    if any(x in k.lower() for x in sensitive_keys):
-                        lines.append(f"- **{label}**: 🔐 `{v}`")
-                    else:
-                        lines.append(f"- **{label}**: {v}")
+                    label = self._markdown_text(key.replace("_", " ").title())
+                    lines.append(f"- **{label}**: {self._markdown_text(value)}")
                 lines.append("\n---")
-        path.write_text("\n".join(lines), encoding='utf-8')
+        with _open_output(path) as stream:
+            stream.write("\n".join(lines))
 
     def _to_text(self, data: Dict, path: Path):
-        lines = [self.banner if self.banner else "UNSEALER REPORT"]
-        lines.append(f"Export Time: {self.timestamp}\n" + "="*40)
+        lines = [self.banner or "UNSEALER REPORT", f"Export Time: {self.timestamp}\n" + "=" * 40]
         for table_name, rows in data.items():
             lines.append(f"\n[{table_name.upper()}]")
             for entry in rows:
                 lines.append("-" * 30)
-                for k, v in entry.items():
-                    label = k.replace('_', ' ').title()
-                    lines.append(f"{label:<18}: {v}")
-        path.write_text("\n".join(lines), encoding='utf-8')
+                for key, value in entry.items():
+                    lines.append(f"{key.replace('_', ' ').title():<18}: {value}")
+        with _open_output(path) as stream:
+            stream.write("\n".join(lines))
 
     def _get_title(self, entry: Dict) -> str:
-        """智能标题识别"""
-        priority_keys = ["title", "name", "issuer", "note_title", "full_name", "bank_name", "account"]
-        for key in priority_keys:
-            if entry.get(key): return str(entry[key])
+        for key in ["title", "name", "issuer", "note_title", "full_name", "bank_name", "account"]:
+            if entry.get(key):
+                return str(entry[key])
         return "Unnamed Record"

@@ -1,135 +1,129 @@
-# src/unsealer/google/decrypter.py
+"""Decode Google Authenticator's migration protobuf without generated bindings."""
 
 import base64
-from urllib.parse import urlparse, parse_qs
-from typing import List, Dict, Any
+import binascii
+from typing import Any, Dict, List
+from urllib.parse import parse_qs, urlparse
 
 from unsealer.common.models import Credential
 
-# --- Protobuf 解析逻辑 (轻量级实现) ---
 
 def _parse_varint(data: bytes, pos: int):
-    """从字节流中安全地解析 Protobuf Varint"""
-    res = 0
-    shift = 0
-    while pos < len(data):
-        b = data[pos]
-        res |= (b & 0x7f) << shift
+    value = 0
+    for index in range(10):
+        if pos >= len(data):
+            raise ValueError("Truncated protobuf varint")
+        byte = data[pos]
         pos += 1
-        if not (b & 0x80):
-            return res, pos
-        shift += 7
-    return res, pos
+        if index == 9 and byte > 1:
+            raise ValueError("Protobuf varint exceeds 64 bits")
+        value |= (byte & 0x7F) << (7 * index)
+        if not byte & 0x80:
+            return value, pos
+    raise ValueError("Invalid protobuf varint")
 
-def _parse_message(data: bytes) -> Dict[int, List[Any]]:
-    """
-    将原始 Protobuf 二进制流映射为 Tag 字典。
-    Google 迁移格式主要使用 Wire Type 0 (Varint) 和 2 (Length-delimited)。
-    """
+
+def _parse_message(data: bytes, wire_types=None) -> Dict[int, List[Any]]:
     pos = 0
-    res = {}
+    result = {}
     while pos < len(data):
-        try:
-            tag_and_type, pos = _parse_varint(data, pos)
-        except (IndexError, ValueError):
-            break
-        
-        tag = tag_and_type >> 3
-        wire_type = tag_and_type & 0x07
-        
-        if wire_type == 0:  # Varint
-            val, pos = _parse_varint(data, pos)
-        elif wire_type == 1:  # 64-bit
-            val = data[pos:pos+8]
-            pos += 8
-        elif wire_type == 2:  # Length-delimited (String/Bytes/Nested)
-            length, pos = _parse_varint(data, pos)
-            val = data[pos:pos+length]
-            pos += length
-        elif wire_type == 5:  # 32-bit
-            val = data[pos:pos+4]
-            pos += 4
+        key, pos = _parse_varint(data, pos)
+        tag, wire_type = key >> 3, key & 7
+        if not 0 < tag < 2 ** 29:
+            raise ValueError("Invalid protobuf field number")
+        if wire_types and tag in wire_types and wire_type != wire_types[tag]:
+            raise ValueError("Unexpected protobuf wire type")
+        if wire_type == 0:
+            value, pos = _parse_varint(data, pos)
         else:
-            # 遇到未知 Wire Type 时停止解析以防止死循环
-            break
-        
-        if tag not in res:
-            res[tag] = []
-        res[tag].append(val)
-    return res
+            if wire_type == 2:
+                length, pos = _parse_varint(data, pos)
+            elif wire_type == 1:
+                length = 8
+            elif wire_type == 5:
+                length = 4
+            else:
+                raise ValueError("Unsupported protobuf wire type")
+            if length > len(data) - pos:
+                raise ValueError("Truncated protobuf field")
+            value = data[pos:pos + length]
+            pos += length
+        result.setdefault(tag, []).append(value)
+    return result
+
+
+def _field(message, tag, default, expected_type):
+    value = message.get(tag, [default])[-1]
+    if not isinstance(value, expected_type):
+        raise ValueError("Unexpected protobuf field type")
+    return value
+
 
 def decrypt_google_auth_uri(uri: str) -> List[Credential]:
-    """
-    解析 Google Authenticator 迁移 URI (otpauth-migration://)。
-    该 URI 包含一个 Base64 编码的 Protobuf 载荷。
-    """
+    """Return complete OTP records, or reject a damaged/unsupported payload."""
     try:
         parsed_uri = urlparse(uri)
-        if parsed_uri.scheme != "otpauth-migration":
-            raise ValueError("非法的协议头部，预期的协议为 'otpauth-migration://'")
+        if parsed_uri.scheme != "otpauth-migration" or parsed_uri.netloc != "offline":
+            raise ValueError("Expected an otpauth-migration://offline URI")
+        values = parse_qs(parsed_uri.query, keep_blank_values=True).get("data", [])
+        if len(values) != 1 or not values[0]:
+            raise ValueError("Expected exactly one non-empty data parameter")
 
-        query_params = parse_qs(parsed_uri.query)
-        encoded_data = query_params.get('data', [''])[0]
-        
-        if not encoded_data:
-            return []
+        encoded_data = values[0].replace(" ", "+")
+        encoded_data += "=" * (-len(encoded_data) % 4)
+        payload = _parse_message(base64.b64decode(encoded_data, altchars=b"-_", validate=True),
+                                 {1: 2, 2: 0, 3: 0, 4: 0, 5: 0})
+        entries = payload.get(1, [])
+        if not entries:
+            raise ValueError("Migration payload contains no OTP accounts")
 
-        # 1. Base64 解码：修复因 QR 扫描器可能丢失的填充符 '='
-        missing_padding = len(encoded_data) % 4
-        if missing_padding:
-            encoded_data += '=' * (4 - missing_padding)
-        
-        # 针对 URL 安全的 Base64 替换（虽然 Google 默认使用标准 Base64，但增加健壮性）
-        binary_payload = base64.b64decode(encoded_data.replace(' ', '+'))
-
-        # 2. 解析外层迁移载荷 (MigrationPayload)
-        # Tag 1: otp_parameters (repeated message)
-        payload_dict = _parse_message(binary_payload)
-        otp_params_list = payload_dict.get(1, [])
-
-        # 3. 协议映射常量
-        # 算法映射 (Google 协议定义: 1=SHA1, 2=SHA256, 3=SHA512)
-        ALGO_MAP = {0: "SHA1", 1: "SHA1", 2: "SHA256", 3: "SHA512", 4: "MD5"}
-        
+        algorithms = {0: "SHA1", 1: "SHA1", 2: "SHA256", 3: "SHA512", 4: "MD5"}
+        digits = {0: "6", 1: "6", 2: "8", 3: "7"}
+        otp_types = {0: "TOTP", 1: "HOTP", 2: "TOTP"}
         results = []
-        for raw_otp in otp_params_list:
-            # 解析内层 OTP 参数
-            # Tag 1: Secret, 2: Name, 3: Issuer, 4: Algorithm, 5: Digits
-            otp_dict = _parse_message(raw_otp)
-            
-            raw_secret = otp_dict.get(1, [b''])[0]
-            name = otp_dict.get(2, [b'Unknown'])[0].decode('utf-8', 'ignore')
-            issuer = otp_dict.get(3, [b''])[0].decode('utf-8', 'ignore')
-            
-            # 默认值处理：Google 默认算法为 SHA1 (idx 1)，默认长度为 6 (idx 1)
-            algo_idx = otp_dict.get(4, [1])[0]
-            digit_idx = otp_dict.get(5, [1])[0]
+        for raw_entry in entries:
+            if not isinstance(raw_entry, bytes):
+                raise ValueError("Invalid OTP message field")
+            entry = _parse_message(raw_entry, {1: 2, 2: 2, 3: 2, 4: 0, 5: 0, 6: 0, 7: 0, 8: 2})
+            secret = _field(entry, 1, b"", bytes)
+            if not secret:
+                raise ValueError("OTP account has no secret")
+            name = _field(entry, 2, b"", bytes).decode("utf-8")
+            issuer = _field(entry, 3, b"", bytes).decode("utf-8")
+            algorithm = _field(entry, 4, 1, int)
+            digit_count = _field(entry, 5, 1, int)
+            otp_type = _field(entry, 6, 2, int)
+            counter = _field(entry, 7, 0, int)
+            if algorithm not in algorithms or digit_count not in digits or otp_type not in otp_types:
+                raise ValueError("Unsupported OTP algorithm, digit count, or type")
+            if counter >= 2 ** 63:
+                raise ValueError("HOTP counter must be a non-negative int64")
 
-            # 关键：将二进制密钥转换为 TOTP 标准的 Base32 编码（移除末尾填充）
-            b32_secret = base64.b32encode(raw_secret).decode('utf-8').rstrip('=')
-            
-            # 处理 Google 常见的 "Issuer:Account" 复合命名格式
-            if not issuer and ":" in name:
-                parts = name.split(":", 1)
-                issuer = parts[0].strip()
-                name = parts[1].strip()
+            if ":" in name:
+                prefix, account = name.split(":", 1)
+                if not issuer or prefix.strip() == issuer:
+                    issuer = issuer or prefix.strip()
+                    name = account.strip()
 
-            # 映射至统一领域模型 Credential
+            extra = {
+                "algorithm": algorithms[algorithm],
+                "digits": digits[digit_count],
+                "original_type": otp_types[otp_type],
+            }
+            if otp_types[otp_type] == "HOTP":
+                extra["counter"] = counter
+            unique_id = _field(entry, 8, b"", bytes).decode("utf-8")
+            if unique_id:
+                extra["unique_id"] = unique_id
             results.append(Credential(
                 title=issuer or name or "Google Authenticator",
                 username=name,
-                secret=b32_secret,
+                secret=base64.b32encode(secret).decode("ascii").rstrip("="),
                 issuer=issuer,
-                category="totp",
-                extra={
-                    "algorithm": ALGO_MAP.get(algo_idx, "SHA1"),
-                    "digits": "8" if digit_idx == 2 else "6",
-                    "original_type": "TOTP"
-                }
+                category=otp_types[otp_type].lower(),
+                extra=extra,
             ))
-            
         return results
-
-    except Exception as e:
-        # 捕获解析过程中的任何异常并包装，防止 CLI 崩溃
-        raise ValueError(f"Google 迁移数据解析失败: {str(e)}")
+    except (ValueError, TypeError, binascii.Error) as exc:
+        # Never include the URI or secret bytes in terminal diagnostics.
+        raise ValueError("Failed to parse migration data: invalid or unsupported payload") from exc

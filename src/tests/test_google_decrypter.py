@@ -21,9 +21,9 @@ def test_google_uri_parsing_success():
     expected_b32 = base64.b32encode(b"password").decode('utf-8').rstrip('=')
     
     assert len(accounts) == 1
-    assert accounts[0]["issuer"] == "service"
-    assert accounts[0]["name"] == "user"
-    assert accounts[0]["totp_secret"] == expected_b32
+    assert accounts[0].issuer == "service"
+    assert accounts[0].username == "user"
+    assert accounts[0].secret == expected_b32
 
 def test_google_uri_invalid_data():
     """

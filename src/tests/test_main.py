@@ -1,20 +1,25 @@
-# src/tests/test_main.py
-import pytest
 import sys
+
+import pytest
+
 from unsealer.__main__ import main
 
-def test_main_dispatch_to_samsung(mocker):
-    """验证 'unsealer samsung' 命令分发到 samsung 模块"""
-    mocker.patch.object(sys, "argv", ["unsealer", "samsung", "input.spass"])
-    mock_samsung_cli = mocker.patch("unsealer.samsung.cli.main")
-    
-    main()
-    mock_samsung_cli.assert_called_once()
 
-def test_main_dispatch_to_google(mocker):
-    """验证 'unsealer google' 命令分发到 google 模块"""
-    mocker.patch.object(sys, "argv", ["unsealer", "google", "otpauth://..."])
-    mock_google_cli = mocker.patch("unsealer.google.cli.main")
-    
-    main()
-    mock_google_cli.assert_called_once()
+@pytest.mark.parametrize("command", ["samsung", "google"])
+def test_main_dispatches_arguments_and_status(mocker, command):
+    handler = mocker.patch(f"unsealer.{command}.cli.main", return_value=1)
+    assert main([command, "input", "--preview"]) == 1
+    handler.assert_called_once_with(["input", "--preview"])
+
+
+def test_global_help_needs_no_optional_dependencies(mocker):
+    mocker.patch.dict(sys.modules, {"pyzbar": None, "pyzbar.pyzbar": None})
+    with pytest.raises(SystemExit) as error:
+        main(["--help"])
+    assert error.value.code == 0
+
+
+def test_uri_input_works_without_zbar(mocker):
+    mocker.patch.dict(sys.modules, {"pyzbar": None, "pyzbar.pyzbar": None})
+    uri = "otpauth-migration://offline?data=ChkKCHBhc3N3b3JkEgR1c2VyGgdzZXJ2aWNl"
+    assert main(["google", uri, "--preview"]) == 0

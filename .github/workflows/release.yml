@@ -1,17 +1,33 @@
-name: Build and Release Executables
+name: Test, Build and Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
+  minimum-python:
+    name: Test Python 3.9
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: python -m pip install ".[test]"
+      - run: python -m pytest -q
+
   build:
-    name: Build for ${{ matrix.os }}
+    name: Test and build for ${{ matrix.asset_name }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
         include:
           - os: ubuntu-latest
             artifact_name: unsealer
@@ -19,75 +35,82 @@ jobs:
           - os: windows-latest
             artifact_name: unsealer.exe
             asset_name: unsealer-windows-x64.exe
-          - os: macos-latest
+          - os: macos-15-intel
             artifact_name: unsealer
             asset_name: unsealer-macos-x64
-
+          - os: macos-15
+            artifact_name: unsealer
+            asset_name: unsealer-macos-arm64
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.12'
 
-      - name: Install System Dependencies
+      - name: Install system QR dependencies
         if: runner.os != 'Windows'
+        shell: bash
         run: |
           if [ "$RUNNER_OS" == "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y libzbar0
-          elif [ "$RUNNER_OS" == "macOS" ]; then
+            sudo apt-get update
+            sudo apt-get install -y libzbar0
+          else
             brew install zbar
           fi
 
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install .
-          pip install pyinstaller
+      - name: Install build and test dependencies
+        run: python -m pip install ".[test]" build pyinstaller
 
-      - name: Build with PyInstaller
+      - name: Run regression tests
+        run: python -m pytest -q
+
+      - name: Build and inspect Python distributions
         shell: bash
         run: |
-          SEP=":"
-          if [[ "${{ runner.os }}" == "Windows" ]]; then SEP=";"; fi
-          pyinstaller --onefile --name unsealer \
-            --clean \
-            --add-data "src/unsealer/samsung/schema.json${SEP}unsealer/samsung" \
+          python -m build
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          python scripts/smoke_test.py
+
+      - name: Build executable
+        shell: bash
+        run: |
+          pyinstaller --onefile --name unsealer --clean --noconfirm \
+            --collect-data pyfiglet \
+            --collect-binaries pyzbar \
+            --collect-data unsealer.samsung \
             src/unsealer/__main__.py
 
-      - name: Rename Artifact
-        shell: bash
-        run: |
-          cd dist
-          mv ${{ matrix.artifact_name }} ${{ matrix.asset_name }}
+      - name: Test executable with synthetic URI, JSON and QR inputs
+        run: python scripts/smoke_test.py --executable dist/${{ matrix.artifact_name }}
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Rename executable
+        shell: bash
+        run: mv "dist/${{ matrix.artifact_name }}" "dist/${{ matrix.asset_name }}"
+
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: dist/${{ matrix.asset_name }}
+          if-no-files-found: error
 
   release:
-    name: Create GitHub Release
-    needs: build
+    name: Publish tagged release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [minimum-python, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: ./assets
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: ./assets/**/*
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           draft: false
           prerelease: false
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

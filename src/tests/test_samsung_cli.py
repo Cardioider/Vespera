@@ -1,70 +1,54 @@
-# src/tests/test_samsung_cli.py
+import json
 
 import pytest
-import sys
-from pathlib import Path
+
 from unsealer.samsung import cli
 
-def test_samsung_cli_success_flow(mocker):
-    """
-    Test the successful data export workflow of the Samsung Pass CLI module.
-    """
-    # 1. Mock command line arguments (Simulated: unsealer samsung test_input.spass -f md)
-    mocker.patch.object(sys, "argv", ["unsealer", "samsung", "test_input.spass", "-f", "md"])
-    
-    # 2. Mock decrypter return data consistent with the current internal schema
-    mock_data = {
-        "logins": [
-            {"title": "Test site", "username_value": "admin", "password_value": "12345"}
-        ],
-        "notes": [
-            {"note_title": "Secret Note", "note_detail": "This is a secret"}
-        ]
-    }
-    
-    # Mock file I/O and core decryption logic
-    mocker.patch("pathlib.Path.read_bytes", return_value=b"mocked_base64_content")
-    mock_decrypt = mocker.patch("unsealer.samsung.cli.decrypt_and_parse", return_value=mock_data)
-    
-    # Mock interactive terminal password prompt
-    mocker.patch("rich.prompt.Prompt.ask", return_value="master_password")
-    
-    # Mock save functions to avoid generating physical files during test execution
-    mock_save_md = mocker.patch("unsealer.samsung.cli.save_as_md")
-    
-    # Mock console status to prevent multi-threading interference in CI/CD environments
-    mocker.patch("rich.console.Console.status")
 
-    # Execute the CLI entry point
-    cli.main()
+@pytest.fixture
+def backup(mocker, tmp_path):
+    source = tmp_path / "test.spass"
+    source.write_bytes(b"synthetic-backup")
+    mocker.patch.object(cli.Prompt, "ask", return_value="test-password")
+    mocker.patch.object(cli, "_display_banner", return_value="test")
+    mocker.patch.object(cli, "decrypt_and_parse", return_value={
+        "logins": [{"title": "Example", "username": "test-user", "password": "test-password"}],
+    })
+    return source
 
-    # 3. Assertion Verification
-    # Verify the decryption function was invoked with correct parameters
-    mock_decrypt.assert_called_once_with(b"mocked_base64_content", "master_password")
-    
-    # Verify the markdown save function was called with the expected transformed path
-    # Note: CLI automatically changes extension from .spass to .md
-    expected_output_path = Path("test_input.md")
-    mock_save_md.assert_called_once()
-    assert mock_save_md.call_args[0][1] == expected_output_path
 
-def test_samsung_cli_invalid_password(mocker):
-    """
-    Test error handling when decryption fails due to an incorrect master password.
-    """
-    mocker.patch.object(sys, "argv", ["unsealer", "samsung", "bad.spass"])
-    mocker.patch("pathlib.Path.read_bytes", return_value=b"some_data")
-    mocker.patch("rich.prompt.Prompt.ask", return_value="wrong_password")
-    
-    # Simulate a decryption failure via ValueError
-    mocker.patch(
-        "unsealer.samsung.cli.decrypt_and_parse", 
-        side_effect=ValueError("Decryption failed. Please verify your master password.")
-    )
-    
-    # Ensure the program exits gracefully with a non-zero status code
-    with pytest.raises(SystemExit) as excinfo:
-        cli.main()
-    
-    # Verify the exit code is 1 (Standard error code)
-    assert excinfo.value.code == 1
+def test_samsung_cli_success_flow(backup):
+    assert cli.main([str(backup), "-f", "json"]) == 0
+    result = json.loads(backup.with_suffix(".json").read_text(encoding="utf-8"))
+    assert result["logins"][0]["username"] == "test-user"
+    cli.decrypt_and_parse.assert_called_once_with(b"synthetic-backup", "test-password")
+
+
+def test_samsung_cli_invalid_password(mocker, backup):
+    mocker.patch.object(cli, "decrypt_and_parse", side_effect=ValueError("Decryption failed"))
+    assert cli.main([str(backup)]) == 1
+    assert not backup.with_suffix(".md").exists()
+
+
+def test_samsung_cli_preview_does_not_write(backup):
+    output = backup.with_suffix(".json")
+    assert cli.main([str(backup), "--preview", "-o", str(output)]) == 0
+    assert not output.exists()
+
+
+def test_samsung_cli_rejects_input_overwrite(backup):
+    assert cli.main([str(backup), "-o", str(backup)]) == 1
+    assert backup.read_bytes() == b"synthetic-backup"
+    cli.Prompt.ask.assert_not_called()
+
+
+def test_samsung_empty_result_does_not_report_success(mocker, backup):
+    mocker.patch.object(cli, "decrypt_and_parse", return_value={})
+    assert cli.main([str(backup)]) == 1
+    assert not backup.with_suffix(".md").exists()
+
+
+def test_samsung_rejects_directory_before_password(mocker, tmp_path):
+    prompt = mocker.patch.object(cli.Prompt, "ask")
+    assert cli.main([str(tmp_path)]) == 1
+    prompt.assert_not_called()

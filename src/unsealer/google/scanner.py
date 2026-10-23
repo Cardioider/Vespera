@@ -1,41 +1,45 @@
-# src/unsealer/google/scanner.py
+"""Optional QR support; importing the CLI must not require a native ZBar library."""
 
-import os
 from pathlib import Path
-from PIL import Image
-from pyzbar.pyzbar import decode
 from typing import Set
 
-def extract_uris_from_path(path_str: str) -> Set[str]:
-    """
-    Scans a file or directory for QR codes and extracts Google migration URIs.
-    
-    :param path_str: Path to an image file or a directory of images.
-    :return: A set of unique migration URIs found.
-    """
-    found_uris = set()
-    path = Path(path_str)
-    
-    if not path.exists():
-        return found_uris
 
-    # Define supported image formats
-    supported_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
-    files = [path] if path.is_file() else list(path.iterdir())
-    
-    for f in files:
-        if f.suffix.lower() not in supported_extensions:
+def _load_decoder():
+    try:
+        from pyzbar.pyzbar import decode
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "QR scanning requires ZBar. Install libzbar0 on Linux or zbar with "
+            "Homebrew on macOS; on Windows reinstall pyzbar and its native dependencies. "
+            "Migration URI and JSON input do not require ZBar."
+        ) from exc
+    return decode
+
+
+def extract_uris_from_path(path_str: str) -> Set[str]:
+    path = Path(path_str)
+    if not path.exists():
+        return set()
+
+    from PIL import Image, UnidentifiedImageError
+
+    decode = _load_decoder()
+    supported_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+    files = [path] if path.is_file() else sorted(path.iterdir())
+    found_uris = set()
+    for file in files:
+        if not file.is_file() or file.suffix.lower() not in supported_extensions:
             continue
         try:
-            with Image.open(f) as img:
-                # Convert to grayscale ('L') to improve recognition contrast
-                decoded_objects = decode(img.convert('L'))
-                for obj in decoded_objects:
-                    content = obj.data.decode('utf-8')
-                    if content.startswith("otpauth-migration://"):
-                        found_uris.add(content)
-        except Exception:
-            # Skip unreadable or corrupted images
+            with Image.open(file) as img:
+                decoded_objects = decode(img.convert("L"))
+        except (OSError, UnidentifiedImageError):
             continue
-            
+        for obj in decoded_objects:
+            try:
+                content = obj.data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if content.startswith("otpauth-migration://"):
+                found_uris.add(content)
     return found_uris
